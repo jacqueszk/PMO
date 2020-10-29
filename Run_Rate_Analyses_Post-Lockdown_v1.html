@@ -1675,7 +1675,7 @@ $(document).ready(function () {
 <li>Hoisted Block 5 SLC 73L loading fraction</li>
 <li>Hoisted Block 5 SLC 75L loading fraction</li>
 <li>Hoisted Block 5 SLC 78L loading fraction</li>
-<li>Hoisted Block 5 SLC Phase 2 73L loading fraction</li>
+<li>Hoisted Block 5 SLC Phase 2 70L loading fraction</li>
 <li>Hoisted Block 5 SLC Phase 2 73L loading fraction</li>
 </ul>
 </div>
