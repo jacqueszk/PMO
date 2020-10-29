@@ -1,0 +1,241 @@
+---
+title: "Run Rate Analyses Post Lockdown"
+output:
+  html_document:
+      # toc: true
+           df_print: paged
+
+---
+
+## {.tabset}
+
+### FDM
+
+* Train Data 6 January 2020 to 22 March 2020
+* Test Data 27 July 2020 to 4 October 2020
+
+#### Independent variables
+
+**Time**
+
+* Day of week
+
+**Engineering**
+
+* Number of LHDs Loading
+
+**Ore Availability**
+
+* Rings Blasted Block 5SLC 70L sum of 7 days lagging window
+* Rings Blasted Block 5SLC 73L sum of 7 days lagging window
+* Rings Blasted Block 5SLC 75L sum of 7 days lagging window
+* Rings Blasted Block 5SLC 78L sum of 7 days lagging window
+
+**Area Contribution**
+
+* Hoisted Block 5 SLC 70L loading fraction
+* Hoisted Block 5 SLC 73L loading fraction
+* Hoisted Block 5 SLC 75L loading fraction
+* Hoisted Block 5 SLC 78L loading fraction
+* Hoisted Block 5 SLC Phase 2 73L loading fraction
+* Hoisted Block 5 SLC Phase 2 73L loading fraction
+
+#### Dependent variable
+
+* Daily Tonnes Hoisted
+
+```{r echo=TRUE}
+# Read train data and inspect 
+FDMTrainCSV <- read.csv("~/GitHub/PMO/Dataset/FDMTrain.csv")
+str(FDMTrainCSV)
+summary(FDMTrainCSV)
+```
+
+#### Decriptive statisitcs and visualisation
+
+
+```{r}
+# Understand correlation between variables
+library(corrplot)
+df<-as.matrix(FDMTrainCSV)
+dfPairs <- df[,2:14]
+dfPairs.cor<-cor(dfPairs)
+corrplot(dfPairs.cor,method="circle")
+```
+
+
+```{r echo=TRUE}
+# Load required libraries
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+```
+
+
+#### Compare algorithms for fit on Train and Test data
+
+```{r}
+mean(FDMTrainCSV$DailyHoist)
+var(FDMTrainCSV$DailyHoist)
+```
+
+var >> mean 
+
+Will therefore use Quasipoisson and not Poisson
+
+Models:
+ 
+* Model1 = Quasipoisson
+* Model2 = Random forest
+* Model3 - XGBoost
+
+```{r}
+# Load Test data 
+FDMTestCSV <- read.csv("~/GitHub/PMO/Dataset/FDMTest.csv")
+```
+
+**Model quasipoisson**
+
+```{r}
+# Model quasipoisson
+formula <- FDMTrainCSV$DailyHoist~.-Instant
+model1 <- glm(formula,data=FDMTrainCSV,family=quasipoisson)
+# Predict on test data
+pred1<-predict(model1,newdata=FDMTestCSV,type="response")
+summary(pred1)
+# Calculate RMSE
+FDMTestCSV %>%
+mutate(residual = pred1 - DailyHoist) %>%
+summarise(rmse=sqrt(mean(residual^2)))
+```
+
+**Model random forest**
+
+```{r}
+# Model random forest
+library(ranger)
+set.seed(5)
+formula <- FDMTrainCSV$DailyHoist~.-Instant
+model2 <- ranger(formula,FDMTrainCSV,num.trees=500,respect.unordered.factors = "order")
+# Predict on test data
+FDMTestCSV$pred2 <- predict(model2,FDMTestCSV)$predictions
+summary(FDMTestCSV$pred2)
+# Calculate RMSE
+FDMTestCSV %>%
+mutate(residual = pred2 - DailyHoist) %>%
+summarise(rmse=sqrt(mean(residual^2)))
+```
+
+**Model XGBoost**
+
+```{r}
+# Model XGBoost
+library(xgboost)
+library(vtreat)
+set.seed(1)
+(outcome <- "DailyHoist")
+(vars <- c("Weekday", "Rings.Blasted.Block.5.SLC.70L","Rings.Blasted.Block.5.SLC.73L","Rings.Blasted.Block.5.SLC.75L","Rings.Blasted.Block.5.SLC.78L","Hoisted.BLOCK.5.SLC.70L","Hoisted.BLOCK.5.SLC.73L","Hoisted.BLOCK.5.SLC.75L","Hoisted.BLOCK.5.SLC.78L","Hoisted.BLOCK.5.Phase.2.SLC.70L","Hoisted.BLOCK.5.Phase.2.SLC.73L","Distinct.LHDs" ))
+treatplan <- designTreatmentsZ(FDMTrainCSV,vars,verbose = FALSE)
+# Get the "clean" and "lev" variables from the scoreFrame
+(newvars <- treatplan %>%
+use_series(scoreFrame) %>%
+filter(code %in% c("clean","lev")) %>%
+use_series(varName))
+# Prepare data  frames with new variables
+FDMTrainCSV.treat <- prepare(treatplan,FDMTrainCSV, varRestriction = newvars)
+FDMTestCSV.treat <- prepare(treatplan,FDMTestCSV, varRestriction = newvars)
+#
+cv <- xgb.cv(data = as.matrix(FDMTrainCSV.treat),
+label = FDMTrainCSV$DailyHoist,
+nrounds = 100,
+nfold = 5,
+objective = "reg:linear",
+eta = 0.3,
+max_depth = 6,
+early_stopping_rounds = 10,
+verbose = 0   # silent
+)
+# Get evaluation log
+elog <- cv$evaluation_log
+#Detrmine amount of trees minimising trees for train and test
+elog %>%
+summarize(ntrees.train = which.min(train_rmse_mean),   # find the index of min(train_rmse_mean)
+ntrees.test  = which.min(test_rmse_mean))    # find the index of min(test_rmse_mean)
+```
+```{r}
+#Use optimal tree
+
+Hoist_model_xgb <- xgboost(data = as.matrix(FDMTrainCSV.treat), # training data as matrix
+label = FDMTrainCSV$DailyHoist,  # column of outcomes
+nrounds = 18,       # number of trees to build
+objective = "reg:linear", # objective
+eta = 0.3,
+depth = 6,
+verbose = 0  # silent
+)
+# Make predictions
+FDMTestCSV$pred3 <- predict(Hoist_model_xgb,as.matrix(FDMTestCSV.treat))
+# Calculate RMSE
+FDMTestCSV %>%
+mutate(residual = pred3 - DailyHoist) %>%
+summarise(rmse=sqrt(mean(residual^2)))
+
+```
+
+
+
+**Random forest model yields the lowest RMSE and is selected**
+
+
+#### Visualise prediction versus actuals for test data
+
+model 2 selected
+
+```{r}
+#Plot prediction versus actual for test data
+ggplot(FDMTestCSV, aes(x=pred2,y=DailyHoist))+
+geom_point()+
+geom_abline()
+```
+
+
+
+```{r}
+#Plot prediction versus actual for test data example
+library(tidyr)
+# Week
+AugAndSep <- FDMTestCSV %>% 
+  # Set start to 0
+  mutate(Instant = (Instant - min(Instant))) %>% 
+  # Gather Buckets and pred2 into a column named value with key valuetype
+  gather(key = valuetype, value = value, DailyHoist, pred2) %>%
+  # Filter for rows 
+  filter(Instant <= 67 & Instant >= 6 ) 
+
+# Plot predictions and Buckets by date/time 
+ggplot(AugAndSep, aes(x = Instant, y = value, color = valuetype, linetype = valuetype)) + 
+  geom_point() + 
+  geom_line() + 
+  scale_x_continuous("Day", breaks = 6:67, labels = 6:67) + 
+  scale_color_brewer(palette = "Dark2") + 
+  ggtitle("Predicted Two Months Daily Hoist, Random Forest plot")
+
+
+```
+
+
+```{r echo=TRUE}
+day_dif <- (FDMTestCSV)%>%
+mutate(res = DailyHoist -pred2)     %>% 
+filter(Instant <= 67 & Instant > 6)
+mapply(sum,day_dif[,14:15]) 
+
+```
+
+
+### Notes
+
+
+#### Packages utilised
+
+tidyr, caret, ranger, vtreat, xgboost, magrittr, ggplot2, dplyr, broom, knitr, rmarkdown, MultivariateRandomForest
